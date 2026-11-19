@@ -1,0 +1,564 @@
+"""
+AIP-C01 Mock Exam — a Streamlit practice/mock-exam app for the
+AWS Certified Generative AI Developer – Professional certification.
+
+Run:  streamlit run app.py
+"""
+import math
+import os
+import random
+import time
+
+import requests
+import streamlit as st
+
+from config import (AI, APP, DOMAIN_WEIGHTS, EXAM_MINUTES, EXAM_SIZE, MIN_PER_QUESTION,
+                    OPENROUTER_MODELS, OPENROUTER_REFERER, OPENROUTER_TITLE, PASS_MARK, PERFORMANCE,
+                    SET_MINUTES_PER_Q, SET_SIZE, STUDY_TIPS)
+from exam import category_breakdown, is_correct, segment_score
+from certyiq_key import CERTYIQ_KEY
+from questions import CASE_STUDIES, CATEGORIES, QUESTIONS
+
+QBY_ID = {q["id"]: q for q in QUESTIONS}
+# Fixed sets: Set 1 = the first 25 questions by number, Set 2 = the next 25, and so on.
+SETS = [sorted(q["id"] for q in QUESTIONS)[i:i + SET_SIZE]
+        for i in range(0, len(QUESTIONS), SET_SIZE)]
+
+# --------------------------------------------------------------------------- #
+# Page setup + styling
+# --------------------------------------------------------------------------- #
+st.set_page_config(page_title=APP["title"], page_icon=APP["icon"], layout="wide")
+
+st.markdown(
+    """
+    <style>
+      .block-container {padding-top: 2rem;}
+      .main-header {background:linear-gradient(100deg,#161E2D 0%,#232F3E 50%,#B35A00 100%);
+        padding:1.4rem 1.8rem;border-radius:14px;color:#fff;margin-bottom:1rem;
+        box-shadow:0 8px 24px rgba(0,0,0,.15);}
+      .main-header h1{margin:0;font-size:1.55rem;letter-spacing:.2px;}
+      .main-header p{margin:.3rem 0 0;opacity:.92;font-size:.92rem;}
+      .qcard{border:1px solid rgba(128,128,128,.22);border-radius:14px;
+        padding:1.3rem 1.6rem;margin:.3rem 0 1rem;background:rgba(127,127,127,.04);}
+      .pill{display:inline-block;padding:.18rem .65rem;border-radius:999px;
+        font-size:.72rem;background:rgba(255,153,0,.16);color:#d98200;
+        font-weight:700;margin-right:.4rem;letter-spacing:.3px;}
+      .pill.type{background:rgba(35,47,62,.14);color:#5b6f8a;}
+      .pill.flag{background:rgba(220,60,60,.16);color:#d33;}
+      .modecard{border:1px solid rgba(128,128,128,.2);border-radius:14px;
+        padding:1.2rem 1.4rem;height:100%;}
+      div[data-testid="stMetricValue"]{font-variant-numeric:tabular-nums;}
+      .stButton>button{border-radius:9px;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# --------------------------------------------------------------------------- #
+# Optional AI explanations (OpenRouter) — cached per question
+# --------------------------------------------------------------------------- #
+def ai_key():
+    """OpenRouter key from Streamlit secrets (openrouter_api_key or api_key) or the environment."""
+    for name in ("openrouter_api_key", "api_key"):
+        try:
+            v = st.secrets.get(name)
+        except Exception:
+            v = None
+        if v:
+            return v
+    return os.environ.get("OPENROUTER_API_KEY")
+
+
+class AIError(Exception):
+    """An AI problem we can explain to the user in plain words."""
+
+
+def ask_ai(q: dict) -> str:
+    key = ai_key()
+    if not key:
+        raise AIError("No OpenRouter key is configured. Add `openrouter_api_key` to the app's Secrets.")
+    prompt = (
+        f"Question: {q['question']}\n"
+        f"Choices: {q['options']}\n"
+        f"Correct answer: {q['answer']}\n"
+        f"Reference: {q.get('reference', '')}"
+    )
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+               "HTTP-Referer": OPENROUTER_REFERER, "X-Title": OPENROUTER_TITLE}
+    problems = []
+    for model in OPENROUTER_MODELS:
+        try:
+            r = requests.post(
+                AI["base_url"], headers=headers, timeout=45,
+                json={"model": model,
+                      "messages": [{"role": "system", "content": AI["system_prompt"]},
+                                   {"role": "user", "content": prompt}],
+                      "max_tokens": AI["max_tokens"], "temperature": AI["temperature"]},
+            )
+        except requests.RequestException as e:
+            problems.append(f"{model}: network error ({type(e).__name__})")
+            continue
+        if r.status_code in (401, 403):
+            raise AIError("OpenRouter rejected the key. Check `openrouter_api_key` in the app's Secrets.")
+        if r.status_code == 402:
+            raise AIError("OpenRouter says the account has no credit left. Add credits and try again.")
+        if r.status_code != 200:
+            problems.append(f"{model}: HTTP {r.status_code}")
+            continue
+        try:
+            text = r.json()["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, ValueError):
+            problems.append(f"{model}: unexpected reply")
+            continue
+        if text and text.strip():
+            return text
+        problems.append(f"{model}: empty reply")
+    raise AIError("No model answered (" + "; ".join(problems) + "). Try again in a minute.")
+
+
+# --------------------------------------------------------------------------- #
+# Session state
+# --------------------------------------------------------------------------- #
+def init_state():
+    ss = st.session_state
+    ss.setdefault("mode", "home")
+    ss.setdefault("deck", [])
+    ss.setdefault("pos", 0)
+    ss.setdefault("history", [])
+    ss.setdefault("answered_ids", set())
+    ss.setdefault("flags", set())
+    ss.setdefault("exam_started_at", None)
+    ss.setdefault("exam_minutes", EXAM_MINUTES)
+    ss.setdefault("submitted", False)
+    ss.setdefault("ai_cache", {})
+
+
+init_state()
+
+
+def start_session(mode: str, categories: list[str], fixed_ids: list[int] | None = None, label: str = ""):
+    ss = st.session_state
+    if fixed_ids is not None:                 # a numbered set: same questions, same order, every time
+        ids = list(fixed_ids)
+    else:
+        pool = [q for q in QUESTIONS if not categories or q["category"] in categories]
+        ids = [q["id"] for q in pool]
+        random.shuffle(ids)                   # rotating draw — different every attempt
+        if mode == "exam":
+            ids = ids[: min(EXAM_SIZE, len(ids))]
+    ss.label = label
+    ss = st.session_state
+    ss.mode, ss.deck, ss.pos = mode, ids, 0
+    ss.history, ss.answered_ids, ss.flags = [], set(), set()
+    ss.submitted = False
+    ss.exam_started_at = time.time() if mode == "exam" else None
+    # Timer scales with deck size at the official pace (2.4 min per question). Sets use the same pace.
+    pace = SET_MINUTES_PER_Q if fixed_ids is not None else MIN_PER_QUESTION
+    cap = EXAM_MINUTES if fixed_ids is None else 10_000
+    ss.exam_minutes = min(cap, max(1, math.ceil(len(ids) * pace)))
+
+
+def reset_home():
+    for k in ("deck", "pos", "history", "answered_ids", "flags",
+              "exam_started_at", "submitted", "label"):
+        st.session_state.pop(k, None)
+    st.session_state.mode = "home"
+    init_state()
+
+
+# --------------------------------------------------------------------------- #
+# Response helpers
+# --------------------------------------------------------------------------- #
+def read_response(q: dict, key_prefix: str):
+    ss = st.session_state
+    if q["type"] == "single":
+        return ss.get(f"{key_prefix}_r")
+    if q["type"] == "multi":
+        return [o for o in q["options"] if ss.get(f"{key_prefix}_c_{o}")]
+    return None
+
+
+def has_answer(q: dict, key_prefix: str) -> bool:
+    r = read_response(q, key_prefix)
+    if isinstance(r, list):
+        return bool(r)
+    return r is not None
+
+
+def pills(q: dict, flagged: bool = False) -> str:
+    task = f'<span class="pill">TASK {q["task"]}</span>' if q.get("task") else ""
+    flag = '<span class="pill flag">🚩 FLAGGED</span>' if flagged else ""
+    return (f'<span class="pill">{q["category"]}</span>{task}'
+            f'<span class="pill type">{"CHOOSE " + str(len(q["answer"])) if q["type"] == "multi" else "SINGLE"}</span>'
+            f'{flag}')
+
+
+def render_question_body(q: dict, key_prefix: str):
+    if q.get("case"):
+        with st.expander("📄 Case study scenario", expanded=False):
+            st.markdown(CASE_STUDIES[q["case"]])
+    st.markdown(q["question"].replace("\n", "\n\n"))
+
+    if q["type"] == "single":
+        return st.radio("Select one:", q["options"], index=None, key=f"{key_prefix}_r")
+    if q["type"] == "multi":
+        st.caption(f"Select all that apply ({len(q['answer'])} correct) — all-or-nothing.")
+        return [o for o in q["options"] if st.checkbox(o, key=f"{key_prefix}_c_{o}")]
+    return None
+
+
+def render_correct(q: dict):
+    if q["type"] == "single":
+        st.markdown(f"**Correct answer:** {q['answer']}")
+    else:
+        st.markdown("**Correct answers:**")
+        for a in q["answer"]:
+            st.markdown(f"- {a}")
+
+
+def render_extras(q: dict):
+    """Explanation, community-vote caution, and citation."""
+    st.info(q["explanation"])
+    if q.get("votes"):
+        split = " · ".join(f"{k} {v}%" for k, v in q["votes"].items())
+        st.caption(f"🗳️ Community vote: {split}")
+    key = CERTYIQ_KEY.get(q["id"])
+    if key:
+        mine = q["answer"][0] if q["type"] == "single" else "".join(sorted(a[0] for a in q["answer"]))
+        if key == mine:
+            st.caption("🔑 Agrees with the CertyIQ answer key.")
+        else:
+            st.caption(f"🔑 CertyIQ answer key says **{key}** — see the note below.")
+    if q.get("note"):
+        st.warning(q["note"])
+    if q.get("reference"):
+        st.caption(f"📚 Citation: {q['reference']}")
+
+
+def render_feedback(q: dict, response):
+    correct = is_correct(q, response)
+    earned, total = segment_score(q, response)
+    (st.success if correct else st.error)(
+        f"{'✅ Correct!' if correct else '❌ Not quite.'}  ({earned}/{total} point)"
+    )
+    render_correct(q)
+    render_extras(q)
+
+    if ai_key():
+        ss = st.session_state
+        if q["id"] in ss.ai_cache:
+            with st.container(border=True):
+                st.markdown("🤖 **AI coach**")
+                st.markdown(ss.ai_cache[q["id"]])
+                st.caption(f"📚 {q.get('reference', '')}")
+        elif st.button("🤖 Get AI explanation", key=f"ai_{q['id']}"):
+            with st.spinner("Thinking…"):
+                try:
+                    ss.ai_cache[q["id"]] = ask_ai(q)
+                except AIError as e:
+                    st.warning(str(e))            # show it, but don't cache: the user can retry
+                    return
+                except Exception as e:
+                    st.warning(f"AI explanation unavailable: {type(e).__name__}. Try again.")
+                    return
+            st.rerun()
+
+
+def record(q: dict, response):
+    e, t = segment_score(q, response)
+    st.session_state.history.append({
+        "id": q["id"], "category": q["category"], "question": q["question"][:90],
+        "is_correct": is_correct(q, response), "earned": e, "total": t,
+    })
+    st.session_state.answered_ids.add(q["id"])
+
+
+# --------------------------------------------------------------------------- #
+# Header
+# --------------------------------------------------------------------------- #
+st.markdown(
+    f"""<div class="main-header"><h1>{APP['icon']} {APP['title']}</h1>
+    <p>{APP['subtitle']} · v{APP['version']} · {len(QUESTIONS)} questions across
+    {len(CATEGORIES)} domains</p></div>""",
+    unsafe_allow_html=True,
+)
+
+
+# --------------------------------------------------------------------------- #
+# HOME
+# --------------------------------------------------------------------------- #
+def view_home():
+    n_exam = min(EXAM_SIZE, len(QUESTIONS))
+    n_min = min(EXAM_MINUTES, max(1, math.ceil(n_exam * MIN_PER_QUESTION)))
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown('<div class="modecard">', unsafe_allow_html=True)
+        st.markdown("### 📝 Practice")
+        st.write("Immediate feedback, the correct answer, an explanation of why each "
+                 "distractor fails, and an AWS documentation citation after each question. "
+                 "Optional AI coach.")
+        st.markdown("</div>", unsafe_allow_html=True)
+    with c2:
+        st.markdown('<div class="modecard">', unsafe_allow_html=True)
+        st.markdown("### ⏱️ Mock Exam")
+        st.write(f"**{n_exam} questions · {n_min} minutes** (official exam: 75 questions · "
+                 f"180 min; timer scales at 2.4 min/question), scored at the end against the "
+                 f"{PASS_MARK}% pass mark (750/1000). Multiple-response items are "
+                 "all-or-nothing. Flag questions and jump around with the navigator.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.write("")
+    cats = st.multiselect("Filter by domain (optional — leave empty for all):", CATEGORIES)
+    b1, b2 = st.columns(2)
+    if b1.button("▶️ Start Practice", use_container_width=True, type="primary"):
+        start_session("practice", cats)
+        st.rerun()
+    if b2.button("⏱️ Start Mock Exam", use_container_width=True):
+        start_session("exam", cats)
+        st.rerun()
+
+    st.divider()
+    st.markdown("#### 📚 Question sets")
+    st.caption(f"The bank is split into fixed sets of {SET_SIZE} questions (by question number). "
+               "Every set is the same questions in the same order each time, so you can repeat a set and "
+               "compare scores. Each set has its own timer at the official pace.")
+    labels = []
+    for i, ids in enumerate(SETS, 1):
+        mins = max(1, math.ceil(len(ids) * SET_MINUTES_PER_Q))
+        labels.append(f"Set {i} · Q{ids[0]}–Q{ids[-1]} · {len(ids)} questions · {mins} min")
+    pick = st.selectbox("Choose a set", range(len(SETS)), format_func=lambda i: labels[i], key="set_pick")
+    if st.button(f"⏱️ Start {labels[pick].split(' · ')[0]}", use_container_width=True, key="start_set"):
+        start_session("exam", [], fixed_ids=SETS[pick], label=labels[pick].split(" · ")[0])
+        st.rerun()
+
+    st.divider()
+    left, right = st.columns([1, 1])
+    with left:
+        st.markdown("#### 💡 Study tips")
+        for t in STUDY_TIPS:
+            st.markdown(f"- {t}")
+    with right:
+        st.markdown("#### 📚 Coverage by domain (official weight)")
+        counts = {c: 0 for c in CATEGORIES}
+        for q in QUESTIONS:
+            counts[q["category"]] += 1
+        for c, w in zip(CATEGORIES, DOMAIN_WEIGHTS.values()):
+            st.markdown(f"- **{c}** — {counts[c]} questions · {w}% of exam")
+
+
+# --------------------------------------------------------------------------- #
+# PRACTICE
+# --------------------------------------------------------------------------- #
+def view_practice():
+    ss = st.session_state
+    if ss.pos >= len(ss.deck):
+        ss.mode = "results"
+        st.rerun()
+
+    q = QBY_ID[ss.deck[ss.pos]]
+    st.markdown(pills(q), unsafe_allow_html=True)
+    st.caption(f"Question {ss.pos + 1} of {len(ss.deck)}")
+
+    st.markdown('<div class="qcard">', unsafe_allow_html=True)
+    render_question_body(q, key_prefix=f"p{q['id']}")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if not ss.submitted:
+        if st.button("Submit", type="primary"):
+            ss.submitted = True
+            record(q, read_response(q, key_prefix=f"p{q['id']}"))
+            st.rerun()
+    else:
+        render_feedback(q, read_response(q, key_prefix=f"p{q['id']}"))
+        n1, n2, _ = st.columns([1, 1, 4])
+        if n1.button("➡️ Next", type="primary"):
+            ss.pos += 1
+            ss.submitted = False
+            st.rerun()
+        if n2.button("🏁 Finish"):
+            ss.mode = "results"
+            st.rerun()
+    _sidebar_practice()
+
+
+# --------------------------------------------------------------------------- #
+# EXAM
+# --------------------------------------------------------------------------- #
+def view_exam():
+    ss = st.session_state
+
+    @st.fragment(run_every=1)
+    def clock():
+        remaining = ss.exam_minutes * 60 - (time.time() - ss.exam_started_at)
+        if remaining <= 0:
+            st.session_state._force_submit = True
+            st.rerun(scope="app")
+        mm, s = divmod(int(remaining), 60)
+        color = "#c62828" if remaining < 300 else "inherit"
+        st.markdown(
+            f"<div style='text-align:right;font-size:1.4rem;font-weight:700;"
+            f"font-variant-numeric:tabular-nums;color:{color}'>⏱ {mm:02d}:{s:02d}</div>",
+            unsafe_allow_html=True,
+        )
+
+    if ss.get("_force_submit"):
+        ss.pop("_force_submit", None)
+        _grade_exam()
+        return
+
+    q = QBY_ID[ss.deck[ss.pos]]
+    top = st.columns([3, 1])
+    with top[0]:
+        answered_n = sum(1 for qid in ss.deck if has_answer(QBY_ID[qid], f"e{qid}"))
+        st.progress(answered_n / len(ss.deck))
+        st.caption(f"Question {ss.pos + 1} of {len(ss.deck)} · answered {answered_n} · "
+                   f"flagged {len(ss.flags)}")
+    with top[1]:
+        clock()
+
+    st.markdown(pills(q, flagged=q["id"] in ss.flags), unsafe_allow_html=True)
+
+    st.markdown('<div class="qcard">', unsafe_allow_html=True)
+    render_question_body(q, key_prefix=f"e{q['id']}")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    flagged = q["id"] in ss.flags
+    nav = st.columns([1, 1, 1.2, 1.4, 3])
+    if nav[0].button("⬅️ Prev", disabled=ss.pos == 0):
+        ss.pos -= 1
+        st.rerun()
+    if nav[1].button("Next ➡️", disabled=ss.pos >= len(ss.deck) - 1):
+        ss.pos += 1
+        st.rerun()
+    if nav[2].button("🚩 Unflag" if flagged else "🚩 Flag"):
+        ss.flags.discard(q["id"]) if flagged else ss.flags.add(q["id"])
+        st.rerun()
+    if nav[3].button("✅ Submit exam", type="primary"):
+        _grade_exam()
+        return
+
+    _exam_navigator()
+
+
+def _exam_navigator():
+    ss = st.session_state
+    with st.sidebar:
+        st.subheader("Navigator")
+        st.caption("● answered · 🚩 flagged · ▸ current")
+        cols = st.columns(5)
+        for idx, qid in enumerate(ss.deck):
+            answered = has_answer(QBY_ID[qid], f"e{qid}")
+            mark = "▸" if idx == ss.pos else ("🚩" if qid in ss.flags else
+                                              ("●" if answered else "○"))
+            if cols[idx % 5].button(f"{mark}{idx + 1}", key=f"jump{idx}"):
+                ss.pos = idx
+                st.rerun()
+        st.divider()
+        if st.button("✅ Submit exam now", use_container_width=True, type="primary"):
+            _grade_exam()
+            st.rerun()
+        if st.button("🚪 Quit to home", use_container_width=True):
+            reset_home()
+            st.rerun()
+
+
+def _grade_exam():
+    ss = st.session_state
+    ss.history = []
+    for qid in ss.deck:
+        q = QBY_ID[qid]
+        record(q, read_response(q, key_prefix=f"e{qid}"))
+    ss.mode = "results"
+    st.rerun()
+
+
+# --------------------------------------------------------------------------- #
+# RESULTS
+# --------------------------------------------------------------------------- #
+def view_results():
+    ss = st.session_state
+    hist = ss.history
+    if not hist:
+        st.info("No answered questions yet.")
+        if st.button("🏠 Home"):
+            reset_home(); st.rerun()
+        return
+
+    earned = sum(h["earned"] for h in hist)
+    total = sum(h["total"] for h in hist)
+    pct = round(100 * earned / total) if total else 0
+    scaled = 100 + round(9 * pct)          # rough 100–1000 equivalent for orientation
+    passed = pct >= PASS_MARK
+
+    st.subheader("📊 Results" + (f" — {ss.get('label')}" if ss.get("label") else ""))
+    m = st.columns(4)
+    m[0].metric("Score", f"{pct}%", help=f"≈ {scaled}/1000 (illustrative; AWS scores are scaled)")
+    m[1].metric("Points", f"{earned}/{total}")
+    m[2].metric("Questions", len(hist))
+    m[3].metric("Result", "PASS ✅" if passed else "FAIL ❌")
+    st.progress(pct / 100)
+    (st.success if passed else st.error)(
+        f"{'🎉 Above' if passed else 'Below'} the {PASS_MARK}% pass mark (750/1000)."
+        + ("" if passed else " Focus on the weakest domains below.")
+    )
+
+    st.markdown("#### Performance by domain")
+    cb = category_breakdown(hist)
+    for cat, d in sorted(cb.items(), key=lambda x: x[1]["correct"] / x[1]["total"]):
+        rate = round(100 * d["correct"] / d["total"])
+        bar = "🟩" if rate >= PERFORMANCE["good"] else "🟨" if rate >= PERFORMANCE["fair"] else "🟥"
+        st.markdown(f"{bar} **{cat}** — {d['correct']}/{d['total']} ({rate}%)")
+
+    st.markdown("#### Review answers")
+    only_wrong = st.toggle("Show only incorrect", value=False)
+    for i, h in enumerate(hist, 1):
+        if only_wrong and h["is_correct"]:
+            continue
+        q = QBY_ID[h["id"]]
+        icon = "✅" if h["is_correct"] else "❌"
+        with st.expander(f"{icon} Q{i}. [{q['category']}] {h['question']}…"):
+            render_correct(q)
+            render_extras(q)
+
+    r1, r2 = st.columns(2)
+    if r1.button("🔁 New session", type="primary"):
+        reset_home(); st.rerun()
+    if r2.button("🏠 Home"):
+        reset_home(); st.rerun()
+
+
+# --------------------------------------------------------------------------- #
+# Practice sidebar
+# --------------------------------------------------------------------------- #
+def _sidebar_practice():
+    ss = st.session_state
+    with st.sidebar:
+        st.subheader("Progress")
+        answered = len(ss.history)
+        correct = sum(1 for h in ss.history if h["is_correct"])
+        st.metric("Answered", f"{answered}/{len(ss.deck)}")
+        if answered:
+            st.metric("Accuracy", f"{round(100 * correct / answered)}%")
+        st.divider()
+        if st.button("🏁 Finish now", use_container_width=True):
+            ss.mode = "results"; st.rerun()
+        if st.button("🚪 Quit to home", use_container_width=True):
+            reset_home(); st.rerun()
+
+
+# --------------------------------------------------------------------------- #
+# Router
+# --------------------------------------------------------------------------- #
+mode = st.session_state.mode
+if mode == "home":
+    view_home()
+elif mode == "practice":
+    view_practice()
+elif mode == "exam":
+    view_exam()
+elif mode == "results":
+    view_results()
+else:
+    reset_home()
+    st.rerun()
