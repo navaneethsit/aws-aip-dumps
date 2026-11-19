@@ -4,8 +4,10 @@ AWS Certified Generative AI Developer – Professional certification.
 
 Run:  streamlit run app.py
 """
+import json
 import math
 import os
+import re
 import random
 import time
 
@@ -49,8 +51,9 @@ input,textarea,[data-baseweb="select"]>div,[data-baseweb="input"]>div{background
 .stButton>button:hover{border-color:var(--accent);color:var(--accent)!important;}
 .stButton>button[kind="primary"]{background:var(--accent);color:#1b1100!important;border-color:var(--accent);}
 [data-testid="stProgress"]>div>div>div{background:var(--accent);}
-[data-testid="stAlert"]{border-radius:12px;}
-[data-testid="stAlert"] p{color:inherit!important;font-size:1rem;}
+[data-testid="stAlert"]{border-radius:12px;background:#1d2740!important;border:1px solid var(--line);border-left:4px solid var(--accent);}
+[data-testid="stAlert"] *{color:var(--ink)!important;}
+[data-testid="stAlert"] p{font-size:1rem;line-height:1.6;}
 hr{border-color:var(--line)!important;}
 [data-testid="stSidebar"] .stButton>button{padding:.35rem .1rem;min-width:0;}
 [data-testid="stSidebar"] .stButton>button p{white-space:nowrap;font-size:.92rem;}
@@ -113,24 +116,40 @@ def _answer_list(q: dict) -> list[str]:
     return [q["answer"]] if q["type"] == "single" else list(q["answer"])
 
 
-def ask_ai(q: dict, response, correct: bool) -> str:
+def _letter(opt: str) -> str:
+    return opt.strip()[:1].upper()
+
+
+def _selected_options(q: dict, response) -> list[str]:
+    if not response:
+        return []
+    return list(response) if isinstance(response, list) else [response]
+
+
+def _parse_json(text: str) -> dict:
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        raise AIError("The AI reply was not in the expected format. Try again.")
+    try:
+        return json.loads(m.group(0))
+    except ValueError as e:
+        raise AIError("The AI reply could not be read. Try again.") from e
+
+
+def ask_ai(q: dict, response, correct: bool) -> dict:
+    """-> {'requirement': str, 'options': {letter: explanation}} for every option letter."""
     key = ai_key()
     if not key:
         raise AIError("No OpenRouter key is configured. Add `openrouter_api_key` to the app's Secrets.")
-    if not response:
-        chosen = "(no answer selected)"
-    elif isinstance(response, list):
-        chosen = " + ".join(response)
-    else:
-        chosen = str(response)
+    marked = [_letter(x) for x in _answer_list(q)]
+    selected = [_letter(x) for x in _selected_options(q, response)]
     prompt = (
         "QUESTION:\n" + q["question"] + "\n\n"
         "OPTIONS:\n" + "\n".join(q["options"]) + "\n\n"
-        "MARKED CORRECT ANSWER: " + " + ".join(_answer_list(q)) + "\n"
+        "MARKED CORRECT ANSWER: " + ", ".join(marked) + "\n"
+        "LEARNER SELECTED: " + (", ".join(selected) if selected else "nothing") + "\n"
         "TRUSTED EXPLANATION: " + q.get("explanation", "") + "\n"
-        "DOCUMENTATION: " + q.get("reference", "") + "\n\n"
-        "THE LEARNER ANSWERED: " + chosen + "\n"
-        "THIS IS: " + ("CORRECT" if correct else "INCORRECT") + "\n"
+        "DOCUMENTATION: " + q.get("reference", "") + "\n"
     )
     headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json",
                "HTTP-Referer": OPENROUTER_REFERER, "X-Title": OPENROUTER_TITLE}
@@ -138,7 +157,7 @@ def ask_ai(q: dict, response, correct: bool) -> str:
     for model in OPENROUTER_MODELS:
         try:
             r = requests.post(
-                AI["base_url"], headers=headers, timeout=45,
+                AI["base_url"], headers=headers, timeout=60,
                 json={"model": model,
                       "messages": [{"role": "system", "content": AI["system_prompt"]},
                                    {"role": "user", "content": prompt}],
@@ -155,14 +174,70 @@ def ask_ai(q: dict, response, correct: bool) -> str:
             problems.append(model + ": HTTP " + str(r.status_code))
             continue
         try:
-            text = r.json()["choices"][0]["message"]["content"]
+            text = r.json()["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, ValueError):
             problems.append(model + ": unexpected reply")
             continue
-        if text and text.strip():
-            return text.strip()
-        problems.append(model + ": empty reply")
+        if not text.strip():
+            problems.append(model + ": empty reply")
+            continue
+        data = _parse_json(text)
+        exp = {}
+        for item in data.get("options") or []:
+            L = str(item.get("letter", "")).strip().upper()[:1]
+            if L:
+                exp[L] = str(item.get("explanation", "")).strip()
+        return {"requirement": str(data.get("requirement", "")).strip(), "options": exp}
     raise AIError("No model answered (" + "; ".join(problems) + "). Try again in a minute.")
+
+
+def _esc_money(t: str) -> str:
+    return t.replace("$", "\\$")
+
+
+def _opt_text(q: dict, letter: str) -> str:
+    for o in q["options"]:
+        if _letter(o) == letter:
+            t = o[3:].strip()
+            return t if len(t) <= 110 else t[:107].rstrip() + "…"
+    return ""
+
+
+def render_ai(q: dict, res: dict, response, correct: bool) -> str:
+    """Build the explanation in the order the learner asked for:
+    1. exact selection + verdict, 2. the selected options explained,
+    3. the correct answer explained (if the learner was wrong), 4. the remaining options."""
+    marked = [_letter(x) for x in _answer_list(q)]
+    selected = [_letter(x) for x in _selected_options(q, response)]
+    exp = res.get("options", {})
+    missing = "_(no explanation returned for this option)_"
+    lines = []
+    sel_txt = ", ".join(selected) if selected else "nothing"
+    verdict = "✅ **Correct**" if correct else "❌ **Incorrect**"
+    lines.append(f"**You selected:** {sel_txt} — {verdict}")
+    if res.get("requirement"):
+        lines.append(f"**Decisive requirement:** {res['requirement']}")
+
+    def bullet(L: str, tag: str) -> str:
+        t = _opt_text(q, L)
+        return f"- **{L}.** {tag}{_esc_money(t)}  \n  {_esc_money(exp.get(L, missing))}"
+
+    if selected:
+        lines.append("\n**Your choice**")
+        for L in selected:
+            tag = "✅ correct — " if L in marked else "❌ incorrect — "
+            lines.append(bullet(L, tag))
+    if not correct:
+        lines.append("\n**The correct answer**")
+        for L in marked:
+            tag = "✅ " + ("(you also picked this) — " if L in selected else "")
+            lines.append(bullet(L, tag))
+    rest = [o for o in (_letter(x) for x in q["options"]) if o not in selected and o not in marked]
+    if rest:
+        lines.append("\n**Why the other choices are wrong**")
+        for L in rest:
+            lines.append(bullet(L, "❌ "))
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #
@@ -278,8 +353,6 @@ def render_extras(q: dict):
             st.caption("🔑 Agrees with the CertyIQ answer key.")
         else:
             st.caption(f"🔑 CertyIQ answer key says **{key}** — see the note below.")
-    if q.get("note"):
-        st.warning(q["note"])
     if q.get("reference"):
         st.caption(f"📚 Citation: {q['reference']}")
 
@@ -295,14 +368,14 @@ def render_feedback(q: dict, response):
 
     if ai_key():
         ss = st.session_state
-        chosen = " + ".join(response) if isinstance(response, list) and response else (response or "none")
-        ckey = str(q["id"]) + "::" + str(chosen)
+        chosen = "|".join(sorted(_selected_options(q, response))) or "none"
+        ckey = str(q["id"]) + "::" + chosen
         if ckey in ss.ai_cache:
             with st.container(border=True):
                 st.markdown("🤖 **AI explanation**")
-                st.markdown(ss.ai_cache[ckey])
+                st.markdown(render_ai(q, ss.ai_cache[ckey], response, correct))
                 st.caption("📚 " + q.get("reference", ""))
-        elif st.button("🤖 AI explanation", key="ai_" + str(q["id"]) + "_" + str(hash(str(chosen)))):
+        elif st.button("🤖 AI explanation", key="ai_" + str(q["id"]) + "_" + chosen):
             with st.spinner("Explaining your answer…"):
                 try:
                     ss.ai_cache[ckey] = ask_ai(q, response, correct)

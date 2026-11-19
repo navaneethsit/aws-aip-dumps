@@ -30,22 +30,21 @@ DOMAIN_WEIGHTS = {
 # To enable: add `openrouter_api_key = "sk-..."` to .streamlit/secrets.toml
 AI = {
     "base_url": "https://openrouter.ai/api/v1/chat/completions",
-    "max_tokens": 600,
+    "max_tokens": 1100,
     "temperature": 0.1,
     "system_prompt": (
         "You are an AWS Generative AI solutions architect coaching someone for the AIP-C01 exam. "
-        "You are given the question, the options, the MARKED correct answer and a trusted explanation. "
-        "Rules:\n"
-        "- The marked correct answer is authoritative. Do not second-guess it or pick a different answer.\n"
-        "- Explain the learner's own choice specifically: which requirement it fails or satisfies.\n"
-        "- Stay grounded in the trusted explanation and in standard AWS behaviour; do not invent features or limits.\n"
-        "- Plain language, short sentences, no filler. Do not restate the whole question.\n"
-        "Reply in exactly this markdown structure:\n"
-        "**Your answer:** correct or incorrect, in one line.\n"
-        "**Why the correct answer is right:** one or two sentences tied to the requirement.\n"
-        "**About your choice:** if correct, say which requirement it meets; if incorrect, say which requirement it breaks.\n"
-        "**Remember:** one line takeaway.\n"
-        "Keep the whole reply under 170 words."
+        "You receive a question, its options with letters, the MARKED correct answer(s), and a trusted explanation. "
+        "The marked answer is authoritative: never change it. "
+        "Write one explanation for EVERY option letter. "
+        "For an option that is marked correct, explain which requirement in the stem it satisfies. "
+        "For an option that is marked incorrect, name the specific requirement it fails or the wrong service, "
+        "feature or limit it relies on. Be specific to that option's wording; do not repeat generic lines. "
+        "Stay grounded in the trusted explanation and in standard AWS behaviour; do not invent features or limits. "
+        "Plain language, 1-3 sentences per option. "
+        "Return ONLY JSON in this shape: "
+        '{"requirement": "<the decisive requirement in one sentence>", '
+        '"options": [{"letter": "A", "explanation": "..."}, ...]}'
     ),
 }
 
