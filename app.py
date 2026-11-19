@@ -37,6 +37,7 @@ DARK_CSS = """
 :root{--bg:#0e1321;--panel:#182033;--panel2:#1e2740;--ink:#eef2f8;--muted:#aab4c8;--line:#34405c;--accent:#ff9f2e;}
 .stApp,[data-testid="stAppViewContainer"],[data-testid="stHeader"]{background:var(--bg)!important;color:var(--ink)!important;}
 [data-testid="stSidebar"]>div{background:#121a2c!important;}
+section[data-testid="stSidebar"]{width:240px!important;min-width:240px!important;max-width:240px!important;}
 .stApp p,.stApp li,.stApp label,.stApp span,.stApp h1,.stApp h2,.stApp h3,.stApp h4,.stApp strong,.stApp td,.stApp th{color:var(--ink)!important;}
 .stApp [data-testid="stCaptionContainer"],.stApp small{color:var(--muted)!important;}
 [data-testid="stMarkdownContainer"] p{font-size:1.04rem;line-height:1.62;}
@@ -62,7 +63,9 @@ hr{border-color:var(--line)!important;}
 .pill{display:inline-block;padding:.22rem .7rem;border-radius:999px;font-size:.78rem;background:rgba(255,159,46,.18);color:#ffb865!important;font-weight:700;margin-right:.45rem;letter-spacing:.3px;}
 .pill.type{background:rgba(120,150,220,.2);color:#b9cdfb!important;}
 .pill.flag{background:rgba(255,80,80,.2);color:#ff9a9a!important;}
-.main-header{background:linear-gradient(100deg,#0b1a33 0%,#1b2e52 55%,#7a3e00 100%)!important;border:1px solid var(--line);}
+.main-header{background:linear-gradient(100deg,#0b1a33 0%,#1b2e52 55%,#7a3e00 100%)!important;border:1px solid var(--line);padding:1.4rem 1.8rem;border-radius:14px;margin:0 0 1rem;box-shadow:0 8px 24px rgba(0,0,0,.25);}
+.main-header h1{margin:0;font-size:1.55rem;letter-spacing:.2px;color:#fff!important;}
+.main-header p{margin:.3rem 0 0;opacity:.92;font-size:.92rem;color:#fff!important;}
 .main-header h1,.main-header p{color:#fff!important;}
 @media (max-width:640px){.block-container{padding:1rem .75rem 3rem!important;}}
 </style>
@@ -182,40 +185,39 @@ def _opt_text(q: dict, letter: str) -> str:
     return ""
 
 
+def _opt_full(q: dict, letter: str) -> str:
+    for o in q["options"]:
+        if _letter(o) == letter:
+            return o[3:].strip()
+    return ""
+
+
 def render_ai(q: dict, res: dict, response, correct: bool) -> str:
-    """Build the explanation in the order the learner asked for:
-    1. exact selection + verdict, 2. the selected options explained,
-    3. the correct answer explained (if the learner was wrong), 4. the remaining options."""
+    """Order: your selection and verdict -> your choice -> the correct answer (if you were wrong)
+    -> the other choices. Each option appears once, with its full text."""
     marked = [_letter(x) for x in _answer_list(q)]
     selected = [_letter(x) for x in _selected_options(q, response)]
     exp = res.get("options", {})
     missing = "_(no explanation returned for this option)_"
-    lines = []
-    sel_txt = ", ".join(selected) if selected else "nothing"
-    verdict = "✅ **Correct**" if correct else "❌ **Incorrect**"
-    lines.append(f"**You selected:** {sel_txt} — {verdict}")
+
+    def item(L: str) -> str:
+        return f"- **{L}.** {_esc_money(_opt_full(q, L))}  \n  {_esc_money(exp.get(L, missing))}"
+
+    lines = [f"**You selected:** {', '.join(selected) or 'nothing'} — "
+             f"{'✅ Correct' if correct else '❌ Incorrect'}"]
     if res.get("requirement"):
         lines.append(f"**Decisive requirement:** {res['requirement']}")
-
-    def bullet(L: str, tag: str) -> str:
-        t = _opt_text(q, L)
-        return f"- **{L}.** {tag}{_esc_money(t)}  \n  {_esc_money(exp.get(L, missing))}"
-
     if selected:
         lines.append("\n**Your choice**")
-        for L in selected:
-            tag = "✅ correct — " if L in marked else "❌ incorrect — "
-            lines.append(bullet(L, tag))
+        lines += [item(L) for L in selected]
     if not correct:
+        missed = [L for L in marked if L not in selected]
         lines.append("\n**The correct answer**")
-        for L in marked:
-            tag = "✅ " + ("(you also picked this) — " if L in selected else "")
-            lines.append(bullet(L, tag))
-    rest = [o for o in (_letter(x) for x in q["options"]) if o not in selected and o not in marked]
+        lines += [item(L) for L in (missed or marked)]
+    rest = [L for L in (_letter(x) for x in q["options"]) if L not in selected and L not in marked]
     if rest:
         lines.append("\n**Why the other choices are wrong**")
-        for L in rest:
-            lines.append(bullet(L, "❌ "))
+        lines += [item(L) for L in rest]
     return "\n".join(lines)
 
 
