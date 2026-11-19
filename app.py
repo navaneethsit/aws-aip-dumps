@@ -29,6 +29,41 @@ SETS = [sorted(q["id"] for q in QUESTIONS)[i:i + SET_SIZE]
 # --------------------------------------------------------------------------- #
 st.set_page_config(page_title=APP["title"], page_icon=APP["icon"], layout="wide")
 
+DARK_CSS = """
+<style>
+:root{--bg:#0e1321;--panel:#182033;--panel2:#1e2740;--ink:#eef2f8;--muted:#aab4c8;--line:#34405c;--accent:#ff9f2e;}
+.stApp,[data-testid="stAppViewContainer"],[data-testid="stHeader"]{background:var(--bg)!important;color:var(--ink)!important;}
+[data-testid="stSidebar"]>div{background:#121a2c!important;}
+.stApp p,.stApp li,.stApp label,.stApp span,.stApp h1,.stApp h2,.stApp h3,.stApp h4,.stApp strong,.stApp td,.stApp th{color:var(--ink)!important;}
+.stApp [data-testid="stCaptionContainer"],.stApp small{color:var(--muted)!important;}
+[data-testid="stMarkdownContainer"] p{font-size:1.04rem;line-height:1.62;}
+[data-testid="stVerticalBlockBorderWrapper"]{background:var(--panel);border-color:var(--line)!important;border-radius:14px!important;padding:.4rem .6rem;}
+[data-testid="stExpander"]{background:var(--panel);border:1px solid var(--line)!important;border-radius:12px;}
+[data-testid="stExpander"] summary,[data-testid="stExpander"] p{color:var(--ink)!important;}
+[data-testid="stMetric"]{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:.6rem .8rem;}
+[data-testid="stMetricLabel"] p{color:var(--muted)!important;}
+[data-testid="stMetricValue"]{color:var(--ink)!important;}
+input,textarea,[data-baseweb="select"]>div,[data-baseweb="input"]>div{background:var(--panel2)!important;color:var(--ink)!important;border-color:var(--line)!important;}
+[data-baseweb="popover"] li,[data-baseweb="menu"] li{background:var(--panel2)!important;color:var(--ink)!important;}
+.stButton>button{background:var(--panel2);color:var(--ink)!important;border:1px solid var(--line);border-radius:10px;font-weight:600;}
+.stButton>button:hover{border-color:var(--accent);color:var(--accent)!important;}
+.stButton>button[kind="primary"]{background:var(--accent);color:#1b1100!important;border-color:var(--accent);}
+[data-testid="stProgress"]>div>div>div{background:var(--accent);}
+[data-testid="stAlert"]{border-radius:12px;}
+[data-testid="stAlert"] p{color:inherit!important;font-size:1rem;}
+hr{border-color:var(--line)!important;}
+[data-testid="stSidebar"] .stButton>button{padding:.35rem .1rem;min-width:0;}
+[data-testid="stSidebar"] .stButton>button p{white-space:nowrap;font-size:.92rem;}
+.pill{display:inline-block;padding:.22rem .7rem;border-radius:999px;font-size:.78rem;background:rgba(255,159,46,.18);color:#ffb865!important;font-weight:700;margin-right:.45rem;letter-spacing:.3px;}
+.pill.type{background:rgba(120,150,220,.2);color:#b9cdfb!important;}
+.pill.flag{background:rgba(255,80,80,.2);color:#ff9a9a!important;}
+.main-header{background:linear-gradient(100deg,#0b1a33 0%,#1b2e52 55%,#7a3e00 100%)!important;border:1px solid var(--line);}
+.main-header h1,.main-header p{color:#fff!important;}
+@media (max-width:640px){.block-container{padding:1rem .75rem 3rem!important;}}
+</style>
+"""
+st.markdown(DARK_CSS, unsafe_allow_html=True)
+
 st.markdown(
     """
     <style>
@@ -74,17 +109,30 @@ class AIError(Exception):
     """An AI problem we can explain to the user in plain words."""
 
 
-def ask_ai(q: dict) -> str:
+def _answer_list(q: dict) -> list[str]:
+    return [q["answer"]] if q["type"] == "single" else list(q["answer"])
+
+
+def ask_ai(q: dict, response, correct: bool) -> str:
     key = ai_key()
     if not key:
         raise AIError("No OpenRouter key is configured. Add `openrouter_api_key` to the app's Secrets.")
+    if not response:
+        chosen = "(no answer selected)"
+    elif isinstance(response, list):
+        chosen = " + ".join(response)
+    else:
+        chosen = str(response)
     prompt = (
-        f"Question: {q['question']}\n"
-        f"Choices: {q['options']}\n"
-        f"Correct answer: {q['answer']}\n"
-        f"Reference: {q.get('reference', '')}"
+        "QUESTION:\n" + q["question"] + "\n\n"
+        "OPTIONS:\n" + "\n".join(q["options"]) + "\n\n"
+        "MARKED CORRECT ANSWER: " + " + ".join(_answer_list(q)) + "\n"
+        "TRUSTED EXPLANATION: " + q.get("explanation", "") + "\n"
+        "DOCUMENTATION: " + q.get("reference", "") + "\n\n"
+        "THE LEARNER ANSWERED: " + chosen + "\n"
+        "THIS IS: " + ("CORRECT" if correct else "INCORRECT") + "\n"
     )
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+    headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json",
                "HTTP-Referer": OPENROUTER_REFERER, "X-Title": OPENROUTER_TITLE}
     problems = []
     for model in OPENROUTER_MODELS:
@@ -97,23 +145,23 @@ def ask_ai(q: dict) -> str:
                       "max_tokens": AI["max_tokens"], "temperature": AI["temperature"]},
             )
         except requests.RequestException as e:
-            problems.append(f"{model}: network error ({type(e).__name__})")
+            problems.append(model + ": network error (" + type(e).__name__ + ")")
             continue
         if r.status_code in (401, 403):
             raise AIError("OpenRouter rejected the key. Check `openrouter_api_key` in the app's Secrets.")
         if r.status_code == 402:
             raise AIError("OpenRouter says the account has no credit left. Add credits and try again.")
         if r.status_code != 200:
-            problems.append(f"{model}: HTTP {r.status_code}")
+            problems.append(model + ": HTTP " + str(r.status_code))
             continue
         try:
             text = r.json()["choices"][0]["message"]["content"]
         except (KeyError, IndexError, ValueError):
-            problems.append(f"{model}: unexpected reply")
+            problems.append(model + ": unexpected reply")
             continue
         if text and text.strip():
-            return text
-        problems.append(f"{model}: empty reply")
+            return text.strip()
+        problems.append(model + ": empty reply")
     raise AIError("No model answered (" + "; ".join(problems) + "). Try again in a minute.")
 
 
@@ -247,20 +295,22 @@ def render_feedback(q: dict, response):
 
     if ai_key():
         ss = st.session_state
-        if q["id"] in ss.ai_cache:
+        chosen = " + ".join(response) if isinstance(response, list) and response else (response or "none")
+        ckey = str(q["id"]) + "::" + str(chosen)
+        if ckey in ss.ai_cache:
             with st.container(border=True):
-                st.markdown("🤖 **AI coach**")
-                st.markdown(ss.ai_cache[q["id"]])
-                st.caption(f"📚 {q.get('reference', '')}")
-        elif st.button("🤖 Get AI explanation", key=f"ai_{q['id']}"):
-            with st.spinner("Thinking…"):
+                st.markdown("🤖 **AI explanation**")
+                st.markdown(ss.ai_cache[ckey])
+                st.caption("📚 " + q.get("reference", ""))
+        elif st.button("🤖 AI explanation", key="ai_" + str(q["id"]) + "_" + str(hash(str(chosen)))):
+            with st.spinner("Explaining your answer…"):
                 try:
-                    ss.ai_cache[q["id"]] = ask_ai(q)
+                    ss.ai_cache[ckey] = ask_ai(q, response, correct)
                 except AIError as e:
-                    st.warning(str(e))            # show it, but don't cache: the user can retry
+                    st.warning(str(e))            # shown, not cached: the user can retry
                     return
                 except Exception as e:
-                    st.warning(f"AI explanation unavailable: {type(e).__name__}. Try again.")
+                    st.warning("AI explanation unavailable: " + type(e).__name__ + ". Try again.")
                     return
             st.rerun()
 
@@ -360,9 +410,8 @@ def view_practice():
     st.markdown(pills(q), unsafe_allow_html=True)
     st.caption(f"Question {ss.pos + 1} of {len(ss.deck)}")
 
-    st.markdown('<div class="qcard">', unsafe_allow_html=True)
-    render_question_body(q, key_prefix=f"p{q['id']}")
-    st.markdown("</div>", unsafe_allow_html=True)
+    with st.container(border=True):
+        render_question_body(q, key_prefix=f"p{q['id']}")
 
     if not ss.submitted:
         if st.button("Submit", type="primary"):
@@ -419,9 +468,8 @@ def view_exam():
 
     st.markdown(pills(q, flagged=q["id"] in ss.flags), unsafe_allow_html=True)
 
-    st.markdown('<div class="qcard">', unsafe_allow_html=True)
-    render_question_body(q, key_prefix=f"e{q['id']}")
-    st.markdown("</div>", unsafe_allow_html=True)
+    with st.container(border=True):
+        render_question_body(q, key_prefix=f"e{q['id']}")
 
     flagged = q["id"] in ss.flags
     nav = st.columns([1, 1, 1.2, 1.4, 3])
