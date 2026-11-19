@@ -46,6 +46,7 @@ DARK_CSS = """
 [data-testid="stMetricLabel"] p{color:var(--muted)!important;}
 [data-testid="stMetricValue"]{color:var(--ink)!important;}
 input,textarea,[data-baseweb="select"]>div,[data-baseweb="input"]>div{background:var(--panel2)!important;color:var(--ink)!important;border-color:var(--line)!important;}
+[data-baseweb="select"] input::placeholder,[data-baseweb="select"] [aria-live],[data-baseweb="select"] div[class*="placeholder"]{color:var(--muted)!important;opacity:1!important;}
 [data-baseweb="popover"] li,[data-baseweb="menu"] li{background:var(--panel2)!important;color:var(--ink)!important;}
 .stButton>button{background:var(--panel2);color:var(--ink)!important;border:1px solid var(--line);border-radius:10px;font-weight:600;}
 .stButton>button:hover{border-color:var(--accent);color:var(--accent)!important;}
@@ -65,32 +66,9 @@ hr{border-color:var(--line)!important;}
 @media (max-width:640px){.block-container{padding:1rem .75rem 3rem!important;}}
 </style>
 """
-st.markdown(DARK_CSS, unsafe_allow_html=True)
+st.html(DARK_CSS)
 
-st.markdown(
-    """
-    <style>
-      .block-container {padding-top: 2rem;}
-      .main-header {background:linear-gradient(100deg,#161E2D 0%,#232F3E 50%,#B35A00 100%);
-        padding:1.4rem 1.8rem;border-radius:14px;color:#fff;margin-bottom:1rem;
-        box-shadow:0 8px 24px rgba(0,0,0,.15);}
-      .main-header h1{margin:0;font-size:1.55rem;letter-spacing:.2px;}
-      .main-header p{margin:.3rem 0 0;opacity:.92;font-size:.92rem;}
-      .qcard{border:1px solid rgba(128,128,128,.22);border-radius:14px;
-        padding:1.3rem 1.6rem;margin:.3rem 0 1rem;background:rgba(127,127,127,.04);}
-      .pill{display:inline-block;padding:.18rem .65rem;border-radius:999px;
-        font-size:.72rem;background:rgba(255,153,0,.16);color:#d98200;
-        font-weight:700;margin-right:.4rem;letter-spacing:.3px;}
-      .pill.type{background:rgba(35,47,62,.14);color:#5b6f8a;}
-      .pill.flag{background:rgba(220,60,60,.16);color:#d33;}
-      .modecard{border:1px solid rgba(128,128,128,.2);border-radius:14px;
-        padding:1.2rem 1.4rem;height:100%;}
-      div[data-testid="stMetricValue"]{font-variant-numeric:tabular-nums;}
-      .stButton>button{border-radius:9px;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+
 
 
 # --------------------------------------------------------------------------- #
@@ -400,12 +378,10 @@ def record(q: dict, response):
 # --------------------------------------------------------------------------- #
 # Header
 # --------------------------------------------------------------------------- #
-st.markdown(
+st.html(
     f"""<div class="main-header"><h1>{APP['icon']} {APP['title']}</h1>
     <p>{APP['subtitle']} · v{APP['version']} · {len(QUESTIONS)} questions across
-    {len(CATEGORIES)} domains</p></div>""",
-    unsafe_allow_html=True,
-)
+    {len(CATEGORIES)} domains</p></div>""")
 
 
 # --------------------------------------------------------------------------- #
@@ -415,21 +391,17 @@ def view_home():
     n_exam = min(EXAM_SIZE, len(QUESTIONS))
     n_min = min(EXAM_MINUTES, max(1, math.ceil(n_exam * MIN_PER_QUESTION)))
     c1, c2 = st.columns(2)
-    with c1:
-        st.markdown('<div class="modecard">', unsafe_allow_html=True)
+    with c1, st.container(border=True):
         st.markdown("### 📝 Practice")
         st.write("Immediate feedback, the correct answer, an explanation of why each "
                  "distractor fails, and an AWS documentation citation after each question. "
                  "Optional AI coach.")
-        st.markdown("</div>", unsafe_allow_html=True)
-    with c2:
-        st.markdown('<div class="modecard">', unsafe_allow_html=True)
+    with c2, st.container(border=True):
         st.markdown("### ⏱️ Mock Exam")
         st.write(f"**{n_exam} questions · {n_min} minutes** (official exam: 75 questions · "
                  f"180 min; timer scales at 2.4 min/question), scored at the end against the "
                  f"{PASS_MARK}% pass mark (750/1000). Multiple-response items are "
                  "all-or-nothing. Flag questions and jump around with the navigator.")
-        st.markdown("</div>", unsafe_allow_html=True)
 
     st.write("")
     cats = st.multiselect("Filter by domain (optional — leave empty for all):", CATEGORIES)
@@ -480,7 +452,7 @@ def view_practice():
         st.rerun()
 
     q = QBY_ID[ss.deck[ss.pos]]
-    st.markdown(pills(q), unsafe_allow_html=True)
+    st.html(pills(q))
     st.caption(f"Question {ss.pos + 1} of {len(ss.deck)}")
 
     with st.container(border=True):
@@ -518,10 +490,9 @@ def view_exam():
             st.rerun(scope="app")
         mm, s = divmod(int(remaining), 60)
         color = "#c62828" if remaining < 300 else "inherit"
-        st.markdown(
+        st.html(
             f"<div style='text-align:right;font-size:1.4rem;font-weight:700;"
-            f"font-variant-numeric:tabular-nums;color:{color}'>⏱ {mm:02d}:{s:02d}</div>",
-            unsafe_allow_html=True,
+            f"font-variant-numeric:tabular-nums;color:{color}'>⏱ {mm:02d}:{s:02d}</div>"
         )
 
     if ss.get("_force_submit"):
@@ -539,7 +510,7 @@ def view_exam():
     with top[1]:
         clock()
 
-    st.markdown(pills(q, flagged=q["id"] in ss.flags), unsafe_allow_html=True)
+    st.html(pills(q, flagged=q["id"] in ss.flags))
 
     with st.container(border=True):
         render_question_body(q, key_prefix=f"e{q['id']}")
