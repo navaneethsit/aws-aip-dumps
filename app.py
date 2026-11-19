@@ -4,6 +4,7 @@ AWS Certified Generative AI Developer – Professional certification.
 
 Run:  streamlit run app.py
 """
+import html
 import json
 import math
 import os
@@ -318,9 +319,54 @@ def render_correct(q: dict):
             st.markdown(f"- {a}")
 
 
+
+CALLOUT = {
+    "success": ("#133a27", "#d4f8e4", "#3ddc97"),
+    "error": ("#3d1d26", "#ffd9e0", "#ff6b7f"),
+    "info": ("#1c2b4b", "#dce9ff", "#7aa7ff"),
+    "warn": ("#3d3317", "#ffecaa", "#ffc857"),
+}
+
+
+def _md_html(text: str) -> str:
+    """Tiny markdown -> HTML for explanations: **bold**, `code`, '- ' bullets, paragraphs."""
+    out, ul = [], False
+    for raw in html.escape(text).split("\n"):
+        line = raw.strip()
+        if not line:
+            if ul:
+                out.append("</ul>"); ul = False
+            continue
+        line = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", line)
+        line = re.sub(r"`([^`]+)`", r"<code>\1</code>", line)
+        if line.startswith("- "):
+            if not ul:
+                out.append("<ul>"); ul = True
+            out.append("<li>" + line[2:] + "</li>")
+        else:
+            if ul:
+                out.append("</ul>"); ul = False
+            out.append("<p>" + line + "</p>")
+    if ul:
+        out.append("</ul>")
+    return "".join(out)
+
+
+def callout(kind: str, body: str, raw: bool = False) -> None:
+    """A coloured message box with its colours set inline, so it reads well in any Streamlit version."""
+    bg, fg, edge = CALLOUT[kind]
+    inner = body if raw else _md_html(body)
+    st.html(
+        f'<div style="background:{bg};color:{fg};border-left:4px solid {edge};border-radius:12px;'
+        f'padding:12px 16px;margin:6px 0 10px;font-size:1rem;line-height:1.6;">'
+        f'<style>.co p{{margin:0 0 6px}} .co ul{{margin:0 0 6px 1.2em;padding:0}}</style>'
+        f'<div class="co">{inner}</div></div>'
+    )
+
+
 def render_extras(q: dict):
     """Explanation, community-vote caution, and citation."""
-    st.info(q["explanation"])
+    callout("info", q["explanation"])
     if q.get("votes"):
         split = " · ".join(f"{k} {v}%" for k, v in q["votes"].items())
         st.caption(f"🗳️ Community vote: {split}")
@@ -338,9 +384,8 @@ def render_extras(q: dict):
 def render_feedback(q: dict, response):
     correct = is_correct(q, response)
     earned, total = segment_score(q, response)
-    (st.success if correct else st.error)(
-        f"{'✅ Correct!' if correct else '❌ Not quite.'}  ({earned}/{total} point)"
-    )
+    callout("success" if correct else "error",
+            ("✅ Correct!" if correct else "❌ Not quite.") + f"  ({earned}/{total} point)", raw=True)
     render_correct(q)
     render_extras(q)
 
@@ -358,10 +403,10 @@ def render_feedback(q: dict, response):
                 try:
                     ss.ai_cache[ckey] = ask_ai(q, response, correct)
                 except AIError as e:
-                    st.warning(str(e))            # shown, not cached: the user can retry
+                    callout("warn", html.escape(str(e)), raw=True)  # not cached: the user can retry
                     return
                 except Exception as e:
-                    st.warning("AI explanation unavailable: " + type(e).__name__ + ". Try again.")
+                    callout("warn", "AI explanation unavailable: " + html.escape(type(e).__name__) + ". Try again.", raw=True)
                     return
             st.rerun()
 
@@ -572,7 +617,7 @@ def view_results():
     ss = st.session_state
     hist = ss.history
     if not hist:
-        st.info("No answered questions yet.")
+        callout("info", "No answered questions yet.")
         if st.button("🏠 Home"):
             reset_home(); st.rerun()
         return
@@ -590,10 +635,9 @@ def view_results():
     m[2].metric("Questions", len(hist))
     m[3].metric("Result", "PASS ✅" if passed else "FAIL ❌")
     st.progress(pct / 100)
-    (st.success if passed else st.error)(
-        f"{'🎉 Above' if passed else 'Below'} the {PASS_MARK}% pass mark (750/1000)."
-        + ("" if passed else " Focus on the weakest domains below.")
-    )
+    callout("success" if passed else "error",
+            f"{'🎉 Above' if passed else 'Below'} the {PASS_MARK}% pass mark (750/1000)."
+            + ("" if passed else " Focus on the weakest domains below."))
 
     st.markdown("#### Performance by domain")
     cb = category_breakdown(hist)
